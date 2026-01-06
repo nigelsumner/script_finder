@@ -11,6 +11,15 @@ from urllib.parse import urljoin, urlparse, unquote
 
 import requests
 from bs4 import BeautifulSoup
+
+# Try to import playwright for JS-rendered pages
+try:
+    from playwright.sync_api import sync_playwright
+    PLAYWRIGHT_AVAILABLE = True
+except ImportError:
+    sync_playwright = None  # type: ignore
+    PLAYWRIGHT_AVAILABLE = False
+
 from PyQt5.QtCore import QThread, pyqtSignal
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -29,21 +38,53 @@ class ScanWorker(QThread):
     scan_complete = pyqtSignal(list)
     scan_error = pyqtSignal(str)
 
-    def __init__(self, session, url, filter_text, follow_links):
+    def __init__(self, session, url, filter_text, follow_links, render_js=False):
         super().__init__()
         self.session = session
         self.url = url
         self.filter_text = filter_text
         self.follow_links = follow_links
+        self.render_js = render_js
+
+    def _fetch_with_playwright(self, url):
+        """Fetch page content using Playwright for JS rendering."""
+        if not PLAYWRIGHT_AVAILABLE or sync_playwright is None:
+            raise RuntimeError("Playwright is not installed")
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.set_extra_http_headers({
+                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            })
+            # Use 'load' instead of 'networkidle' - many sites never reach network idle due to ads/analytics
+            page.goto(url, wait_until='load', timeout=60000)
+            # Wait for content to render
+            page.wait_for_timeout(2000)
+            # Scroll down to trigger lazy loading
+            page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
+            page.wait_for_timeout(2000)  # Wait for lazy-loaded content
+            # Scroll back up and down to trigger more content
+            page.evaluate('window.scrollTo(0, 0)')
+            page.wait_for_timeout(500)
+            page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
+            page.wait_for_timeout(1500)
+            content = page.content()
+            browser.close()
+            return content
 
     def run(self):
         try:
             found_pdfs = set()
 
             # Fetch the main page
-            response = self.session.get(self.url, timeout=30)
-            response.raise_for_status()
-            soup = BeautifulSoup(response.text, 'lxml')
+            if self.render_js and PLAYWRIGHT_AVAILABLE:
+                self.log_message.emit("Using browser to render JavaScript...")
+                html_content = self._fetch_with_playwright(self.url)
+                soup = BeautifulSoup(html_content, 'lxml')
+            else:
+                response = self.session.get(self.url, timeout=30)
+                response.raise_for_status()
+                soup = BeautifulSoup(response.text, 'lxml')
 
             # Find all links
             all_links = soup.find_all('a', href=True)
@@ -53,6 +94,14 @@ class ScanWorker(QThread):
             script_keywords = [
                 'script', 'screenplay', 'teleplay', 'pilot', 'episode',
                 'transcript', 'draft', 'shooting', 'final'
+            ]
+
+            # URL patterns that indicate script detail pages (like /script/movie-name)
+            script_page_patterns = [
+                r'/script/[\w-]+',
+                r'/scripts/[\w-]+',
+                r'/screenplay/[\w-]+',
+                r'/screenplays/[\w-]+',
             ]
 
             for link in all_links:
@@ -71,9 +120,13 @@ class ScanWorker(QThread):
                 # Follow links if enabled
                 elif self.follow_links:
                     combined = (link_text + ' ' + href.lower())
-                    if any(kw in combined for kw in script_keywords):
+                    # Check if link matches script keywords or script page URL patterns
+                    is_script_link = any(kw in combined for kw in script_keywords)
+                    is_script_page = any(re.search(pattern, href) for pattern in script_page_patterns)
+                    
+                    if is_script_link or is_script_page:
                         try:
-                            self.log_message.emit(f"Following link: {link_text[:50]}...")
+                            self.log_message.emit(f"Following link: {link_text[:50] if link_text else href[:50]}...")
                             sub_response = self.session.get(full_url, timeout=15)
                             sub_soup = BeautifulSoup(sub_response.text, 'lxml')
 
@@ -100,13 +153,36 @@ class ScanWorker(QThread):
         """Check if a URL points to a PDF file."""
         url_lower = url.lower()
         href_lower = href.lower()
+        parsed = urlparse(url_lower)
+        path = parsed.path
 
-        if url_lower.endswith('.pdf') or href_lower.endswith('.pdf'):
+        # Direct .pdf extension (handles query strings like file.pdf?v=123)
+        if path.endswith('.pdf'):
             return True
-        if 'pdf' in urlparse(url_lower).path:
+        if href_lower.endswith('.pdf') or '.pdf?' in href_lower or '.pdf#' in href_lower:
             return True
+        
+        # Check for pdf in path segments
+        if '/pdf/' in path or '/pdfs/' in path:
+            return True
+        
+        # Known script hosting CDNs and domains
+        script_pdf_domains = [
+            'assets.scriptslug.com',
+            'scriptslug.com/live/pdf',
+            'dailyscript.com',
+            'imsdb.com',
+            'screenplaydb.com',
+            'scriptpdf.com',
+        ]
+        if any(domain in url_lower for domain in script_pdf_domains):
+            if 'pdf' in url_lower or path.endswith('.pdf'):
+                return True
+        
+        # Download links with pdf indication
         if 'download' in url_lower and 'pdf' in url_lower:
             return True
+        
         return False
 
     def _matches_filter(self, url, link_text):
@@ -121,11 +197,23 @@ class ScanWorker(QThread):
         parsed = urlparse(url)
         path = unquote(parsed.path)
         filename = os.path.basename(path)
+        
+        # Remove query string from filename if present
+        if '?' in filename:
+            filename = filename.split('?')[0]
 
         if not filename or not filename.endswith('.pdf'):
-            filename = re.sub(r'[^\w\-_.]', '_', path.split('/')[-1])
-            if not filename.endswith('.pdf'):
-                filename += '.pdf'
+            # Try to extract meaningful name from path
+            path_parts = [p for p in path.split('/') if p]
+            if path_parts:
+                base_name = path_parts[-1]
+                # Clean up the filename
+                filename = re.sub(r'[^\w\-_.]', '_', base_name)
+                if not filename.endswith('.pdf'):
+                    filename += '.pdf'
+            else:
+                filename = 'script.pdf'
+        
         return filename
 
 
@@ -255,6 +343,18 @@ class ScriptFinder(QMainWindow):
         checkbox_layout.addStretch()
         options_layout.addLayout(checkbox_layout)
 
+        # Second row of checkboxes
+        checkbox_layout2 = QHBoxLayout()
+        self.render_js_check = QCheckBox("Render JavaScript (for dynamic sites like ScriptSlug)")
+        if not PLAYWRIGHT_AVAILABLE:
+            self.render_js_check.setEnabled(False)
+            self.render_js_check.setToolTip("Install playwright: pip install playwright && playwright install chromium")
+        else:
+            self.render_js_check.setToolTip("Uses a headless browser to render JavaScript-heavy pages")
+        checkbox_layout2.addWidget(self.render_js_check)
+        checkbox_layout2.addStretch()
+        options_layout.addLayout(checkbox_layout2)
+
         filter_layout = QHBoxLayout()
         filter_layout.addWidget(QLabel("Filter (optional):"))
         self.filter_entry = QLineEdit()
@@ -361,8 +461,9 @@ class ScriptFinder(QMainWindow):
         # Create and start worker thread
         filter_text = self.filter_entry.text().strip().lower()
         follow_links = self.follow_links_check.isChecked()
+        render_js = self.render_js_check.isChecked() and PLAYWRIGHT_AVAILABLE
 
-        self.scan_worker = ScanWorker(self.session, url, filter_text, follow_links)
+        self.scan_worker = ScanWorker(self.session, url, filter_text, follow_links, render_js)
         self.scan_worker.log_message.connect(self._log)
         self.scan_worker.scan_complete.connect(self._scan_complete)
         self.scan_worker.scan_error.connect(self._scan_error)
