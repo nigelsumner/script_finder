@@ -6,17 +6,21 @@ Script Finder - A tool to find and download PDF movie/TV scripts from websites.
 import os
 import re
 import sys
+import warnings
 from urllib.parse import urljoin, urlparse, unquote
 
 import requests
 from bs4 import BeautifulSoup
-from PyQt5.QtCore import Qt, QThread, pyqtSignal
+from PyQt5.QtCore import QThread, pyqtSignal
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QGroupBox, QLineEdit, QPushButton, QCheckBox, QLabel,
     QTreeWidget, QTreeWidgetItem, QTextEdit, QProgressBar,
     QFileDialog, QMessageBox, QHeaderView
 )
+
+# Suppress warnings
+warnings.filterwarnings('ignore')
 
 
 class ScanWorker(QThread):
@@ -457,6 +461,196 @@ class ScriptFinder(QMainWindow):
 def main():
     """Main entry point."""
     app = QApplication(sys.argv)
+    
+    # Apply dark mode stylesheet
+    dark_stylesheet = """
+        QMainWindow, QWidget {
+            background-color: #1e1e1e;
+            color: #d4d4d4;
+        }
+        
+        QGroupBox {
+            border: 1px solid #3e3e3e;
+            border-radius: 5px;
+            margin-top: 10px;
+            padding-top: 10px;
+            font-weight: bold;
+            color: #d4d4d4;
+        }
+        
+        QGroupBox::title {
+            subcontrol-origin: margin;
+            left: 10px;
+            padding: 0 5px;
+        }
+        
+        QLineEdit {
+            background-color: #2d2d2d;
+            border: 1px solid #3e3e3e;
+            border-radius: 3px;
+            padding: 5px;
+            color: #d4d4d4;
+            selection-background-color: #264f78;
+        }
+        
+        QLineEdit:focus {
+            border: 1px solid #007acc;
+        }
+        
+        QPushButton {
+            background-color: #0e639c;
+            border: 1px solid #0e639c;
+            border-radius: 3px;
+            padding: 6px 12px;
+            color: #ffffff;
+            font-weight: bold;
+        }
+        
+        QPushButton:hover {
+            background-color: #1177bb;
+            border: 1px solid #1177bb;
+        }
+        
+        QPushButton:pressed {
+            background-color: #005a9e;
+        }
+        
+        QPushButton:disabled {
+            background-color: #3e3e3e;
+            border: 1px solid #3e3e3e;
+            color: #6e6e6e;
+        }
+        
+        QCheckBox {
+            color: #d4d4d4;
+            spacing: 5px;
+        }
+        
+        QCheckBox::indicator {
+            width: 18px;
+            height: 18px;
+            border: 1px solid #3e3e3e;
+            border-radius: 3px;
+            background-color: #2d2d2d;
+        }
+        
+        QCheckBox::indicator:checked {
+            background-color: #0e639c;
+            border: 1px solid #0e639c;
+            image: url(data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTYiIGhlaWdodD0iMTYiIHZpZXdCb3g9IjAgMCAxNiAxNiIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cGF0aCBkPSJNNi41IDEybC00LjUtNC41TDMuNSA2bDMgM0wxMyAzbDEuNSAxLjV6IiBmaWxsPSIjZmZmIi8+PC9zdmc+);
+        }
+        
+        QCheckBox::indicator:hover {
+            border: 1px solid #007acc;
+        }
+        
+        QTreeWidget {
+            background-color: #252526;
+            border: 1px solid #3e3e3e;
+            border-radius: 3px;
+            color: #d4d4d4;
+            alternate-background-color: #2d2d30;
+            selection-background-color: #264f78;
+        }
+        
+        QTreeWidget::item {
+            padding: 4px;
+        }
+        
+        QTreeWidget::item:hover {
+            background-color: #2a2d2e;
+        }
+        
+        QTreeWidget::item:selected {
+            background-color: #264f78;
+        }
+        
+        QHeaderView::section {
+            background-color: #2d2d2d;
+            color: #d4d4d4;
+            padding: 5px;
+            border: none;
+            border-right: 1px solid #3e3e3e;
+            border-bottom: 1px solid #3e3e3e;
+            font-weight: bold;
+        }
+        
+        QTextEdit {
+            background-color: #1e1e1e;
+            border: 1px solid #3e3e3e;
+            border-radius: 3px;
+            color: #d4d4d4;
+            selection-background-color: #264f78;
+        }
+        
+        QProgressBar {
+            border: 1px solid #3e3e3e;
+            border-radius: 3px;
+            background-color: #2d2d2d;
+            text-align: center;
+            color: #d4d4d4;
+        }
+        
+        QProgressBar::chunk {
+            background-color: #0e639c;
+            border-radius: 2px;
+        }
+        
+        QLabel {
+            color: #d4d4d4;
+        }
+        
+        QScrollBar:vertical {
+            background-color: #1e1e1e;
+            width: 12px;
+            border: none;
+        }
+        
+        QScrollBar::handle:vertical {
+            background-color: #424242;
+            border-radius: 6px;
+            min-height: 20px;
+        }
+        
+        QScrollBar::handle:vertical:hover {
+            background-color: #4e4e4e;
+        }
+        
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+            height: 0px;
+        }
+        
+        QScrollBar:horizontal {
+            background-color: #1e1e1e;
+            height: 12px;
+            border: none;
+        }
+        
+        QScrollBar::handle:horizontal {
+            background-color: #424242;
+            border-radius: 6px;
+            min-width: 20px;
+        }
+        
+        QScrollBar::handle:horizontal:hover {
+            background-color: #4e4e4e;
+        }
+        
+        QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+            width: 0px;
+        }
+        
+        QMessageBox {
+            background-color: #1e1e1e;
+        }
+        
+        QMessageBox QLabel {
+            color: #d4d4d4;
+        }
+    """
+    
+    app.setStyleSheet(dark_stylesheet)
+    
     window = ScriptFinder()
     window.show()
     sys.exit(app.exec_())
